@@ -23,7 +23,7 @@ class Francis {
             let item = self.workingRequests.shift();
             item.xhr.abort();
         }
-        ///TODO: Either set status back to normal or whatever and handle any ready transactions.
+        ///TODO: Either set status back to normal or whatever and handle any ready transactions. idk...
     }
 
     abortTransaction (transactionName) {
@@ -50,6 +50,11 @@ class Francis {
 
     createTransaction (transactionName, options) {
         let self = this;
+
+        if(self.transactions.hasOwnProperty(transactionName)) {
+            ///TODO: Should this method abort any transaction with the specified name if there exists one already?
+            ///TODO: Or how should this handle an existing transaction with the same name??
+        }
 
         self._createTransaction(transactionName);
 
@@ -83,12 +88,14 @@ class Francis {
         let self = this;
 
         self.transactions[transactionName] = {
+            name: transactionName,
             context: {},
             actions: [],
             status: Francis.QUERIER_STATUS.IDLE,
             mode: Francis.QUERIER_MODE.SINGLE,
             failedCount: 0,
             successCount: 0,
+            ended: false,
             transactionError: function () { self.logger.log('oops, something went wrong :('); },
             finalize: function () { self.logger.log('yay, it worked :)'); }
         };
@@ -149,21 +156,62 @@ class Francis {
         }
 
         //Add item to the transaction action queue
-        transaction.actions.push(ajaxObject);
+        transaction.actions.push({ transactionName: transactionName, transactionId: transaction.context.transactionId, requestId: requestId, ajaxObject: ajaxObject });
     }
 
-    _performActualQuery (ajaxObject) {
-        $.ajax(ajaxObject); // That was easy! (for now)
+    _performActualQuery (workItem) {
+        let self = this;
+
+        self.currentTransaction = workItem.transactionName;
+        self.workingRequests.push({
+            transactionName: workItem.transactionName,
+            transactionId: workItem.transactionId,
+            requestId: workItem.requestId,
+            xhr: $.ajax(workItem.ajaxObject)
+        });
+    }
+
+    _requestDone (transaction) {
+        let self = this;
+
+        if(transaction.actions.length) {
+            if(transaction.status !== Francis.QUERIER_STATUS.READY && self.status === Francis.QUERIER_STATUS.LOCKED || (self.mode === Francis.QUERIER_MODE.SINGLE && self.currentTransaction !== transaction.name)) {
+                self.readyTransactions.push(transaction.name);
+                transaction.status = Francis.QUERIER_STATUS.READY;
+            } else if (transaction.status === Francis.QUERIER_STATUS.LOCKED || transaction.status === Francis.QUERIER_STATUS.ABORTING) {
+                ///TODO: probably just do nothing
+            } else {
+                ///I think I'm done checking shit for other cases... for now
+                self.workQueue.push(transaction.actions.shift());
+            }
+        } else {
+            if(transaction.ended) {
+                transaction.finalize();
+            }
+        }
+
+        self._doWork();
+    }
+
+    _doWork () {
+        let self = this;
+
+        if(self.workQueue.length && (self.status === Francis.QUERIER_STATUS.IDLE || self.status === Francis.QUERIER_STATUS.WORKING)) {
+            let workItem = self.workQueue.shift();
+            self._performActualQuery(workItem);
+        }
     }
 
     static get QUERIER_STATUS () {
         return {
             IDLE: 0x1,
-            AWAITING_RESPONSE: 0x2,
-            HANDLING_RESPONSE: 0x3,
-            ERROR: 0x4,
-            LOCKED: 0x5,
-            ABORTING: 0x6
+            WORKING: 0x2,
+            AWAITING_RESPONSE: 0x3,
+            HANDLING_RESPONSE: 0x4,
+            ERROR: 0x5,
+            LOCKED: 0x6,
+            ABORTING: 0x7,
+            READY: 0x8
         };
     }
 
