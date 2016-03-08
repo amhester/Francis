@@ -11,6 +11,7 @@ class Francis {
         self.currentTransaction = '';
         self.logger = options.logger || console;
         self.mode = options.mode || Francis.QUERIER_MODE.PARALLEL;
+        self.uniqueTransactions = options.uniqueTransactions || true;
 
         self.transactions = {};
     }
@@ -19,69 +20,87 @@ class Francis {
         let self = this;
 
         self.status = Francis.QUERIER_STATUS.ABORTING;
-        while(self.workingRequests.length) {
-            let item = self.workingRequests.shift();
-            item.xhr.abort();
+        for(let i = 0; i < self.transactions.length; i++) {
+            let transaction = self.transactions[i];
+            while(self.workingRequests.length) {
+                self._abortTransaction(transaction.name);
+            }
+            transaction.status = Francis.QUERIER_STATUS.IDLE;
         }
+        self.status = Francis.QUERIER_STATUS.READY;
         ///TODO: Either set status back to normal or whatever and handle any ready transactions. idk...
+        ///WJ: I think we move back to idle at this point. maybe also bubble an event/execute a callback
+        ///for the user to handle the abort all, and even better, this method should probably call the abort
+        ///transaction and do that work at a low level. Really we should have a single point of callback
+        ///or event bubbling and just send the type of event that triggered it
+
+        return self;
+    }
+
+    removeTransaction (transactionName) {
+        let self = this;
+        self._removeTransaction(transactionName);
+        return self;
     }
 
     abortTransaction (transactionName) {
         let self = this;
-
-        let transaction = self.transactions[transactionName];
-        transaction.status = Francis.QUERIER_STATUS.ABORTING;
-        for(let i = 0; i < self.workingRequests.length; i++) {
-            let r = self.workingRequests[i];
-            if(r.transactionId === transaction.context.transactionId) {
-                r.xhr.abort();
-                self.workingRequests.splice(i, 1);
-            }
-        }
+        self._abortTransaction(transactionName);
+        return self;
     }
 
     query (transactionName, ajaxObject, options) {
         let self = this;
-
         self._addActionToTransaction(transactionName, ajaxObject);
-
-        return this;
+        return self;
     }
 
     createTransaction (transactionName, options) {
         let self = this;
 
         if(self.transactions.hasOwnProperty(transactionName)) {
-            ///TODO: Should this method abort any transaction with the specified name if there exists one already?
-            ///TODO: Or how should this handle an existing transaction with the same name??
+            if (self.uniqueTransactions){
+                self._removeTransaction(transactionName);
+                self._createTransaction(transactionName);
+            }
         }
-
-        self._createTransaction(transactionName);
+        else{
+            self._createTransaction(transactionName);
+        }
 
         if(options) {
-            let transaction = self.transactions[transactionName];
-            transaction.mode = options.mode || transaction.mode;
-            transaction.transactionError = options.transactionError || transaction.transactionError;
-            transaction.finalize = options.finalize || transaction.finalize;
+            self._setTransactionOptions(self.transactions[transactionName], options);
         }
-
-        return this;
+        return self;
     }
+
+
 
     startAll () {
         let self = this;
+        return self;
     }
 
     startTransaction (transactionName) {
         let self = this;
+        return self;
     }
 
     stopAll () {
         let self = this;
+        return self;
     }
 
     stop (transactionName) {
         let self = this;
+        return self;
+    }
+
+    _setTransactionOptions (transaction, options){
+        transaction.mode = options.mode || transaction.mode;
+        transaction.transactionError = options.transactionError || transaction.transactionError;
+        transaction.finalize = options.finalize || transaction.finalize;
+        return transaction;
     }
 
     _createTransaction (transactionName) {
@@ -102,6 +121,33 @@ class Francis {
 
         context.transactionId = 'something'; // Need a uuid
     }
+
+    _removeTransaction (transactionName){
+        let self = this;
+        self.status = Francis.QUERIER_STATUS.CLEANUP;
+        self._abortTransaction(transactionName);
+        self.transactions = self.transactions.filter(transaction => transaction.name !== transactionName);
+        self.status = Francis.QUERIER_STATUS.READY;
+    }
+
+    _abortTransaction(transactionName){
+        let self = this;
+        let transaction = self.transactions[transactionName];
+        let transactionId = transaction.context.transactionId;
+        let requestsToAbort = self.workingRequests.filter(request => request.transactionId === transactionId);
+
+        //Set up aborting state
+        transaction.status = Francis.QUERIER_STATUS.ABORTING;
+        //Abort each request for the transaction
+        requestsToAbort.forEach(request => request.xhr.abort());
+        //remove all requests related to that transaction from the working set
+        self.workingRequests = self.workingRequests.filter(request => request.transactionId !== transactionId);
+        //reset to idle state
+        transaction.status = Francis.QUERIER_STATUS.IDLE;
+
+        self.logger.log('Transaction [' + transaction.name + '] aborted successfully. ' + requestsToAbort.length + ' related requests canceled.');
+    }
+
 
     _addActionToTransaction (transactionName, ajaxObject) {
         let self = this;
@@ -211,7 +257,8 @@ class Francis {
             ERROR: 0x5,
             LOCKED: 0x6,
             ABORTING: 0x7,
-            READY: 0x8
+            READY: 0x8,
+            CLEANUP: 0x9
         };
     }
 
