@@ -17,6 +17,7 @@ var Francis = function () {
         self.currentTransaction = '';
         self.logger = options.logger || console;
         self.mode = options.mode || Francis.QUERIER_MODE.PARALLEL;
+        self.uniqueTransactions = options.uniqueTransactions || true;
 
         self.transactions = {};
     }
@@ -27,35 +28,42 @@ var Francis = function () {
             var self = this;
 
             self.status = Francis.QUERIER_STATUS.ABORTING;
-            while (self.workingRequests.length) {
-                var item = self.workingRequests.shift();
-                item.xhr.abort();
+
+            for (var key in self.transactions) {
+                if (self.transactions.hasOwnProperty(key)) {
+                    self.abortTransaction(key); //because the key in the map is the transactionName
+                }
             }
-            ///TODO: Either set status back to normal or whatever and handle any ready transactions.
+
+            self.status = Francis.QUERIER_STATUS.IDLE;
+            ///TODO: Either set status back to normal or whatever and handle any ready transactions. idk...
+            ///WJ: I think we move back to idle at this point. maybe also bubble an event/execute a callback
+            ///for the user to handle the abort all, and even better, this method should probably call the abort
+            ///transaction and do that work at a low level. Really we should have a single point of callback
+            ///or event bubbling and just send the type of event that triggered it
+
+            return self;
+        }
+    }, {
+        key: 'removeTransaction',
+        value: function removeTransaction(transactionName) {
+            var self = this;
+            self._removeTransaction(transactionName);
+            return self;
         }
     }, {
         key: 'abortTransaction',
         value: function abortTransaction(transactionName) {
             var self = this;
-
-            var transaction = self.transactions[transactionName];
-            transaction.status = Francis.QUERIER_STATUS.ABORTING;
-            for (var i = 0; i < self.workingRequests.length; i++) {
-                var r = self.workingRequests[i];
-                if (r.transactionId === transaction.context.transactionId) {
-                    r.xhr.abort();
-                    self.workingRequests.splice(i, 1);
-                }
-            }
+            self._abortTransaction(transactionName);
+            return self;
         }
     }, {
         key: 'query',
         value: function query(transactionName, ajaxObject, options) {
             var self = this;
-
             self._addActionToTransaction(transactionName, ajaxObject);
-
-            return this;
+            return self;
         }
     }, {
         key: 'createTransaction',
@@ -63,40 +71,51 @@ var Francis = function () {
             var self = this;
 
             if (self.transactions.hasOwnProperty(transactionName)) {
-                ///TODO: Should this method abort any transaction with the specified name if there exists one already?
-                ///TODO: Or how should this handle an existing transaction with the same name??
+                if (self.uniqueTransactions) {
+                    self._removeTransaction(transactionName);
+                    self._createTransaction(transactionName);
+                }
+            } else {
+                ///TODO: Should probably figure out how to properly handle multiple transactions going concurrently of the same type. Honestly, should probably just not let it happen, but we can talk about it.
+                self._createTransaction(transactionName);
             }
-
-            self._createTransaction(transactionName);
 
             if (options) {
-                var transaction = self.transactions[transactionName];
-                transaction.mode = options.mode || transaction.mode;
-                transaction.transactionError = options.transactionError || transaction.transactionError;
-                transaction.finalize = options.finalize || transaction.finalize;
+                self._setTransactionOptions(self.transactions[transactionName], options);
             }
-
-            return this;
+            return self;
         }
     }, {
         key: 'startAll',
         value: function startAll() {
             var self = this;
+            return self;
         }
     }, {
         key: 'startTransaction',
         value: function startTransaction(transactionName) {
             var self = this;
+            return self;
         }
     }, {
         key: 'stopAll',
         value: function stopAll() {
             var self = this;
+            return self;
         }
     }, {
         key: 'stop',
         value: function stop(transactionName) {
             var self = this;
+            return self;
+        }
+    }, {
+        key: '_setTransactionOptions',
+        value: function _setTransactionOptions(transaction, options) {
+            transaction.mode = options.mode || transaction.mode;
+            transaction.transactionError = options.transactionError || transaction.transactionError;
+            transaction.finalize = options.finalize || transaction.finalize;
+            return transaction;
         }
     }, {
         key: '_createTransaction',
@@ -120,7 +139,45 @@ var Francis = function () {
                 }
             };
 
-            context.transactionId = 'something'; // Need a uuid
+            self.transactions[transactionName].context.transactionId = 'something'; // Need a uuid
+        }
+    }, {
+        key: '_removeTransaction',
+        value: function _removeTransaction(transactionName) {
+            var self = this;
+            //self.status = Francis.QUERIER_STATUS.CLEANUP; //I don't think it's necessary to change the global status whenever you're removing a transaction
+            self._abortTransaction(transactionName);
+            //Filter won't work on an object (just checked)
+            //self.transactions = self.transactions.filter(transaction => transaction.name !== transactionName);
+            delete self.transactions[transactionName];
+            //self.status = Francis.QUERIER_STATUS.READY; //Same comment as above
+        }
+    }, {
+        key: '_abortTransaction',
+        value: function _abortTransaction(transactionName) {
+            var self = this;
+
+            var transaction = self.transactions[transactionName];
+            //If the transaction is already aborting, just return.
+            if (transaction.status === Francis.QUERIER_STATUS.ABORTING) return false;
+
+            var transactionId = transaction.context.transactionId;
+
+            //Set up aborting state
+            transaction.status = Francis.QUERIER_STATUS.ABORTING;
+
+            //What are your thoughts on this change, should minimize the amount of looping over stuff.
+            for (var i = 0; i < self.workingRequests.length; i++) {
+                var workItem = self.workingRequests[i];
+                if (workItem.transactionId === transactionId) {
+                    workItem.xhr.abort();
+                }
+            }
+
+            //reset to idle state
+            //transaction.status = Francis.QUERIER_STATUS.IDLE; //Should probably set this after the transactionHandler or finalize callbacks get called, or more likely just remove the transaction when done.
+
+            self.logger.log('Transaction [' + transaction.name + '] aborted successfully. ' + requestsToAbort.length + ' related requests canceled.');
         }
     }, {
         key: '_addActionToTransaction',
@@ -132,53 +189,25 @@ var Francis = function () {
 
             ///TODO: add appropriate headers to ajaxObject (x-transaction-id, x-request-id)
 
-            if (transaction.mode === Francis.QUERIER_MODE.SINGLE) {
-                (function () {
-                    var origSuccess = ajaxObject.success;
-                    ajaxObject.success = function () {
-                        successCount++;
-                        ///TODO: add next item in transaction queue to global worker queue.
-                        ///TODO: If last action in transaction queue, call finalize.
-                        if (origSuccess && typeof origSuccess === 'function') {
-                            origSuccess();
-                        }
-                    };
+            var origSuccess = ajaxObject.success;
+            ajaxObject.success = function () {
+                transaction.successCount++;
+                self._removeItemFromWorkQueue(requestId);
+                self._requestDone(transaction);
+                if (origSuccess && typeof origSuccess === 'function') {
+                    origSuccess();
+                }
+            };
 
-                    var origError = ajaxObject.error;
-                    ajaxObject.error = function () {
-                        failedCount++;
-                        ///TODO: add next item in transaction queue to global worker queue.
-                        ///TODO: If last action in transaction queue, call finalize.
-                        if (origError && typeof origError === 'function') {
-                            origError();
-                        }
-                    };
-                })();
-            } else if (transaction.mode === Francis.QUERIER_MODE.PARALLEL) {
-                (function () {
-                    var origSuccess = ajaxObject.success;
-                    ajaxObject.success = function () {
-                        successCount++;
-                        ///TODO: add next item in transaction queue to global worker queue.
-                        ///TODO: If last action in transaction queue, call finalize.
-                        if (origSuccess && typeof origSuccess === 'function') {
-                            origSuccess();
-                        }
-                    };
-
-                    var origError = ajaxObject.error;
-                    ajaxObject.error = function () {
-                        failedCount++;
-                        ///TODO: add next item in transaction queue to global worker queue.
-                        ///TODO: If last action in transaction queue, call finalize.
-                        if (origError && typeof origError === 'function') {
-                            origError();
-                        }
-                    };
-                })();
-            } else {
-                return false;
-            }
+            var origError = ajaxObject.error;
+            ajaxObject.error = function () {
+                transaction.failedCount++;
+                self._removeItemFromWorkQueue(requestId);
+                self._requestDone(transaction);
+                if (origError && typeof origError === 'function') {
+                    origError();
+                }
+            };
 
             //Add item to the transaction action queue
             transaction.actions.push({ transactionName: transactionName, transactionId: transaction.context.transactionId, requestId: requestId, ajaxObject: ajaxObject });
@@ -197,6 +226,20 @@ var Francis = function () {
             });
         }
     }, {
+        key: '_removeItemFromWorkQueue',
+        value: function _removeItemFromWorkQueue(requestId) {
+            var self = this;
+
+            for (var i = 0; i < self.workingRequests.length; i++) {
+                var workItem = self.workingRequests[i];
+                if (workItem.requestId === requestId) {
+                    self.workingRequests.splice(i, 1);
+                    return true;
+                }
+            }
+            return false;
+        }
+    }, {
         key: '_requestDone',
         value: function _requestDone(transaction) {
             var self = this;
@@ -208,8 +251,9 @@ var Francis = function () {
                 } else if (transaction.status === Francis.QUERIER_STATUS.LOCKED || transaction.status === Francis.QUERIER_STATUS.ABORTING) {
                     ///TODO: probably just do nothing
                 } else {
-                        ///I think I'm done checking shit for other cases... for now
-                        self.workQueue.push(transaction.actions.shift());
+                        if (transaction.mode === Francis.QUERIER_MODE.SINGLE) {
+                            self.workQueue.push(transaction.actions.shift());
+                        }
                     }
             } else {
                 if (transaction.ended) {
@@ -240,7 +284,8 @@ var Francis = function () {
                 ERROR: 0x5,
                 LOCKED: 0x6,
                 ABORTING: 0x7,
-                READY: 0x8
+                READY: 0x8,
+                CLEANUP: 0x9
             };
         }
     }, {

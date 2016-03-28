@@ -150,7 +150,6 @@ class Francis {
             let workItem = self.workingRequests[i];
             if(workItem.transactionId === transactionId) {
                 workItem.xhr.abort();
-                self.workingRequests.splice(i,1);
             }
         }
 
@@ -169,49 +168,25 @@ class Francis {
 
         ///TODO: add appropriate headers to ajaxObject (x-transaction-id, x-request-id)
 
-        if(transaction.mode === Francis.QUERIER_MODE.SINGLE) {
-            let origSuccess = ajaxObject.success;
-            ajaxObject.success = function () {
-                successCount++;
-                ///TODO: add next item in transaction queue to global worker queue.
-                ///TODO: If last action in transaction queue, call finalize.
-                if(origSuccess && typeof origSuccess === 'function') {
-                    origSuccess();
-                }
-            };
+        let origSuccess = ajaxObject.success;
+        ajaxObject.success = function () {
+            transaction.successCount++;
+            self._removeItemFromWorkQueue(requestId);
+            self._requestDone(transaction);
+            if(origSuccess && typeof origSuccess === 'function') {
+                origSuccess();
+            }
+        };
 
-            let origError = ajaxObject.error;
-            ajaxObject.error = function () {
-                failedCount++;
-                ///TODO: add next item in transaction queue to global worker queue.
-                ///TODO: If last action in transaction queue, call finalize.
-                if(origError && typeof origError === 'function') {
-                    origError();
-                }
-            };
-        } else if (transaction.mode === Francis.QUERIER_MODE.PARALLEL) {
-            let origSuccess = ajaxObject.success;
-            ajaxObject.success = function () {
-                successCount++;
-                ///TODO: add next item in transaction queue to global worker queue.
-                ///TODO: If last action in transaction queue, call finalize.
-                if(origSuccess && typeof origSuccess === 'function') {
-                    origSuccess();
-                }
-            };
-
-            let origError = ajaxObject.error;
-            ajaxObject.error = function () {
-                failedCount++;
-                ///TODO: add next item in transaction queue to global worker queue.
-                ///TODO: If last action in transaction queue, call finalize.
-                if(origError && typeof origError === 'function') {
-                    origError();
-                }
-            };
-        } else {
-            return false;
-        }
+        let origError = ajaxObject.error;
+        ajaxObject.error = function () {
+            transaction.failedCount++;
+            self._removeItemFromWorkQueue(requestId);
+            self._requestDone(transaction);
+            if(origError && typeof origError === 'function') {
+                origError();
+            }
+        };
 
         //Add item to the transaction action queue
         transaction.actions.push({ transactionName: transactionName, transactionId: transaction.context.transactionId, requestId: requestId, ajaxObject: ajaxObject });
@@ -227,6 +202,19 @@ class Francis {
             requestId: workItem.requestId,
             xhr: $.ajax(workItem.ajaxObject)
         });
+    }
+
+    _removeItemFromWorkQueue (requestId) {
+        let self= this;
+
+        for(let i = 0; i < self.workingRequests.length; i++) {
+            let workItem = self.workingRequests[i];
+            if(workItem.requestId === requestId) {
+                self.workingRequests.splice(i,1);
+                return true;
+            }
+        }
+        return false;
     }
 
     _requestDone (transaction) {
